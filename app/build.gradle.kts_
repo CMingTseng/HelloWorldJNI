@@ -1,0 +1,127 @@
+plugins {
+    application
+    alias(libs.plugins.kotlin.jvm)
+}
+
+application {
+    mainClass.set("org.kmp.jni.HelloWorld") // Set your main class [5]
+}
+
+// --- 路徑配置開始 ---
+// 1. CMakeLists.txt 所在的 JNI/C++ 原始碼目錄
+val jniSourceDirName = "src/main/jni" // 可修改為 "src/main/cpp" 等
+
+// 2. CMake 在 Gradle build 目錄下使用的子目錄名稱，用於存放 CMake 的建置輸出
+val cmakeOutputSubDirName = "jni" // 例如 app/build/jni
+
+// 3. 最終複製和更名後的原生函式庫存放的目錄名稱 (相對於當前 app 模組根目錄)
+val finalNativeLibsDirName = "native" // 可修改為 "libs" 等
+// 使用配置的變數來更新 java.library.path
+val runtimeNativeLibsDir = project.layout.buildDirectory.dir(cmakeOutputSubDirName).get().asFile
+
+// Custom task to build the native library using CMake
+tasks.register<Exec>("buildNativeLib") {
+    description = "Builds the native library using CMake and MinGW."
+    group = "build"
+
+    // 使用配置的變數
+    val actualJniSourceDir = project.file(jniSourceDirName)
+    val actualCmakeBuildDir = project.layout.buildDirectory.dir(cmakeOutputSubDirName).get().asFile
+    val actualFinalNativeLibsDir = project.projectDir.resolve(finalNativeLibsDirName)
+
+    workingDir = actualJniSourceDir // CMake 命令的 workingDir
+
+    commandLine(
+        "cmake",
+        "-S", ".", // Source directory (相對於 workingDir)
+        "-B", actualCmakeBuildDir.relativeTo(actualJniSourceDir).path, // Build directory (相對於 workingDir)
+        "-G", "MinGW Makefiles",
+        // 確保這些 MinGW 路徑是正確的，或者也將它們提取為變數
+//        "-D", "CMAKE_C_COMPILER=D:/MinGW/bin/x86_64-w64-mingw32-gcc.exe",
+//        "-D", "CMAKE_CXX_COMPILER=D:/MinGW/bin/x86_64-w64-mingw32-g++.exe",
+//        "-D", "CMAKE_MAKE_PROGRAM=D:/MinGW/bin/mingw32-make.exe"
+    )
+
+    doLast {
+        // Step 1: 執行 make
+        exec {
+            workingDir = actualCmakeBuildDir // make 命令的 workingDir
+            commandLine("mingw32-make")
+        }
+
+        // sourceDir 已經是 actualCmakeBuildDir
+        // targetDir 已經是 actualFinalNativeLibsDir
+
+        println("== File Operations in doLast (Using Configurable Paths) ==")
+        println("Source Directory (CMake build output): ${actualCmakeBuildDir.absolutePath}")
+        println("Target Directory (Final native libs): ${actualFinalNativeLibsDir.absolutePath}")
+        actualFinalNativeLibsDir.mkdirs()
+
+        // 需求 2: 在來源位置 (actualCmakeBuildDir) 將 lib*.dll 更名
+        println("Renaming lib*.dll files in source directory (${actualCmakeBuildDir.absolutePath}):")
+        actualCmakeBuildDir.walkTopDown().forEach { fileToRename ->
+            if (fileToRename.isFile && fileToRename.name.startsWith("lib") && fileToRename.name.endsWith(".dll")) {
+                val newNameInSource = fileToRename.name.substring(3)
+                val newFileInSource = File(fileToRename.parentFile, newNameInSource)
+                print("  Attempting to rename in source: ${fileToRename.name} to $newNameInSource ... ")
+                if (fileToRename.renameTo(newFileInSource)) {
+                    println("SUCCESS")
+                } else {
+                    println("FAILED (File may be locked or path issue)")
+                }
+            }
+        }
+
+        // 需求 1: 複製指定的庫檔案到最終目標目錄
+        println("Copying specified libraries to target directory (${actualFinalNativeLibsDir.absolutePath}):")
+        project.copy {
+            from(actualCmakeBuildDir) {
+                include("*.dll", "*.so", "*.dylib")
+            }
+            into(actualFinalNativeLibsDir)
+            rename { originalFileName ->
+                val finalTargetName = if (originalFileName.endsWith(".dll") && originalFileName.startsWith("lib")) {
+                    originalFileName.substring(3)
+                } else {
+                    originalFileName
+                }
+                println("  Preparing to copy '$originalFileName' as '$finalTargetName' to target.")
+                finalTargetName
+            }
+            eachFile(object : org.gradle.api.Action<org.gradle.api.file.FileCopyDetails> {
+                override fun execute(fileCopyDetails: org.gradle.api.file.FileCopyDetails) {
+                    println("    Copied to target: ${fileCopyDetails.name} (from source relative path: ${fileCopyDetails.sourcePath})")
+                }
+            })
+        }
+        println("===================================")
+    }
+}
+
+// Make the 'jar' task depend on 'buildNativeLib'
+tasks.jar {
+    dependsOn("buildNativeLib")
+    // Optionally, configure the JAR manifest to include java.library.path
+    // or instruct users to set it when running.
+    // For simplicity, we'll assume the DLL is in a known location relative to the JAR
+    // or the user sets java.library.path.
+}
+
+tasks.test {
+    useJUnitPlatform()
+    // Ensure the native library is available when running tests
+    dependsOn("buildNativeLib")
+    systemProperty("java.library.path", runtimeNativeLibsDir.absolutePath)
+}
+
+// Ensure native library is built before running the application
+//當你寫 tasks.run { ... } 時，如果沒有足夠的上下文提示，Kotlin DSL 的類型推斷系統可能無法確定 run 是一個 JavaExec 類型的任務。因此，它不會識別 JavaExec 特有的 dependsOn 方法（儘管 dependsOn 是一個非常通用的任務方法，但有時類型推斷的缺失會導致解析問題，特別是在更複雜的閉包結構中）和 systemProperty 方法。通過使用 tasks.named<JavaExec>("run")，你明確地告訴 Gradle：「我要配置一個名為 'run' 的任務，並且我知道它的類型是 JavaExec。」這樣，IDE 和 Gradle 就能正確解析該類型擁有的所有屬性和方法。
+//tasks.run {//FAIL
+tasks.named<JavaExec>("run") {
+    dependsOn("buildNativeLib")
+    systemProperty("java.library.path", runtimeNativeLibsDir.absolutePath)
+}
+
+dependencies {
+    testImplementation(kotlin("test"))
+}
