@@ -13,7 +13,7 @@ application {
 
 var settingCmakeFolder  :String? = "src/main/jni" //Manually like Android externalNativeBuild cmake path
 var camke_version = "3.22.1"//Manually like Android externalNativeBuild cmake version
-var mingwMakePath :String? =  "D:/MinGW/bin/mingw32-make.exe"
+var makePath :String? =  "D:/MinGW/bin/mingw32-make.exe"
 var jniOutputFolder :String? =  "libs" //Manually
 val currentOs = OperatingSystem.current()
 val osIdentifier = when {
@@ -23,6 +23,7 @@ val osIdentifier = when {
     // Add other OS families if needed, or a default
     else -> currentOs.name.toLowerCase().replace(" ", "_")
 }
+
 tasks.register<Exec>("buildNativeLib") {
     description = "Builds the native library using CMake"
     group = "build"
@@ -94,14 +95,14 @@ tasks.register<Exec>("buildNativeLib") {
         if (!mingwHomeEnv.isNullOrBlank()) {
             println("Using MinGW_HOME: $mingwHomeEnv")
             val mingwBinPath = Paths.get(mingwHomeEnv, "bin")
-            mingwMakePath = Paths.get(mingwBinPath.toString(), "mingw32-make.exe").toString()
+            makePath = Paths.get(mingwBinPath.toString(), "mingw32-make.exe").toString()
             mingwgcc = Paths.get(mingwBinPath.toString(), "x86_64-w64-mingw32-gcc.exe").toString() // Or your specific gcc like x86_64-w64-mingw32-gcc.exe
             mingwgccplusplus = Paths.get(mingwBinPath.toString(), "x86_64-w64-mingw32-g++.exe").toString() // Or your specific g++
         }
-        if (mingwHomeEnv.isNullOrBlank() && mingwMakePath.isNullOrBlank()) {
+        if (mingwHomeEnv.isNullOrBlank() && makePath.isNullOrBlank()) {
             throw GradleException("MinGW make command path not found or invalid. Windows must install MinGW and then set environment variable MinGW_HOME . You can go to MSYS2 ( https://www.msys2.org/ ) or use Standalone MinGW-w64 ( https://winlibs.com/ )")
         }
-        makeCommand = mingwMakePath!!
+        makeCommand = makePath!!
         val cmakeGenerator = "MinGW Makefiles"
         cmakeArgs.add("-G")
         cmakeArgs.add(cmakeGenerator)
