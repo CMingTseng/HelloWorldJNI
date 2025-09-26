@@ -1,7 +1,3 @@
-import org.gradle.internal.os.OperatingSystem
-import java.nio.file.Files
-import java.nio.file.Paths
-
 plugins {
     application
     alias(libs.plugins.kotlin.jvm)
@@ -75,6 +71,7 @@ tasks.withType(JavaExec::class.java).configureEach {
         }
     }
 }
+
 dependencies {
     testImplementation(kotlin("test"))
 }
