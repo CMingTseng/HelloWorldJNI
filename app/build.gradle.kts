@@ -1,4 +1,6 @@
 import org.gradle.internal.os.OperatingSystem
+import java.nio.file.Files
+import java.nio.file.Paths
 
 plugins {
     application
@@ -9,15 +11,20 @@ application {
     mainClass.set("org.kmp.jni.HelloWorld") // Set your main class [5]
 }
 
-var settingCmakeFolder = "src/main/jni" // 可修改為 "src/main/cpp" 等
+var settingCmakeFolder : String? = "src/main/jni" // 可修改為 "src/main/cpp" 等
 var targetJdkVersion: String = JavaVersion.VERSION_17.toString()
+var jniOutputFolder: String? = "native" // 可修改為 "libs" 等
+var cmakeBuildType: String = "Release"
+// --- Internal build script variables ---
+val currentHostOs = OperatingSystem.current()
+val actualJniSourceDir = settingCmakeFolder?.let { project.file(it) }
+    ?: project.file("src/main/jni")
 
 val cmakeBuildDirRoot =
     project.layout.buildDirectory.dir(".cxx").get().asFile
 
-var jniOutputFolder: String? = "native" // 可修改為 "libs" 等
+val cmakeBuildDirForCurrentOS = cmakeBuildDirRoot//
 
-val currentHostOs = OperatingSystem.current()
 val hostOsIdentifier = currentHostOs.run {
     when {
         isWindows -> "windows"
@@ -34,27 +41,150 @@ val osBuildIdentifier = when {
     else -> currentHostOs.name.toLowerCase().replace(" ", "_")
 }
 
+// --- CMake Executable Finder ---
+fun findCMakeExecutable(project: Project): String {
+    val logger = project.logger
+    // Priority 1: ANDROID_HOME
+    val androidHome = System.getenv("ANDROID_HOME")
+    if (androidHome != null && androidHome.isNotBlank()) {
+        val cmakeSdkPath = project.file("$androidHome/cmake")
+        if (cmakeSdkPath.exists() && cmakeSdkPath.isDirectory) {
+            val latestCmakeVersionDir = cmakeSdkPath.listFiles()
+                ?.filter { it.isDirectory && it.name.matches(Regex("\\d+\\.\\d+\\.\\d+")) }
+                ?.maxByOrNull { it.name }
+            if (latestCmakeVersionDir != null) {
+                val standardCMakeVersions = listOf("3.22.1", "3.18.1", "3.10.2", "3.6.0")
+                val specificVersionPath = standardCMakeVersions.firstNotNullOfOrNull { version ->
+                    val path = project.file("${cmakeSdkPath.absolutePath}/$version/bin/cmake" + if (currentHostOs.isWindows) ".exe" else "")
+                    if (path.exists() && path.canExecute()) path else null
+                }
+                val cmakeFromAndroidHome = specificVersionPath ?: project.file("${latestCmakeVersionDir.absolutePath}/bin/cmake" + if (currentHostOs.isWindows) ".exe" else "")
+
+                if (cmakeFromAndroidHome.exists() && cmakeFromAndroidHome.canExecute()) {
+                    logger.lifecycle("Found CMake via ANDROID_HOME: ${cmakeFromAndroidHome.absolutePath}")
+                    return cmakeFromAndroidHome.absolutePath
+                } else {
+                    logger.warn("ANDROID_HOME was set, CMake directory found, but cmake executable not found or not executable (tried common versions and ${latestCmakeVersionDir.name}).")
+                }
+            } else {
+                logger.warn("ANDROID_HOME was set, CMake directory found ($cmakeSdkPath), but no versioned CMake subdirectory found.")
+            }
+        }
+    }
+
+    val cmakeHomeEnv = System.getenv("CMAKE_HOME")
+    if (cmakeHomeEnv != null && cmakeHomeEnv.isNotBlank()) {
+        val cmakeFromHome = project.file("$cmakeHomeEnv/bin/cmake" + if (currentHostOs.isWindows) ".exe" else "")
+        if (cmakeFromHome.exists() && cmakeFromHome.canExecute()) {
+            logger.lifecycle("Found CMake via CMAKE_HOME: ${cmakeFromHome.absolutePath}")
+            return cmakeFromHome.absolutePath
+        } else {
+            logger.warn("CMAKE_HOME was set to '$cmakeHomeEnv', but cmake executable not found or not executable in its bin directory.")
+        }
+    }
+
+    val commonPaths = mutableListOf<String>()
+    val cmakeExeName = "cmake" + if (currentHostOs.isWindows) ".exe" else ""
+    when {
+        currentHostOs.isMacOsX -> {
+            commonPaths.add("/usr/local/bin/$cmakeExeName")
+            commonPaths.add("/opt/homebrew/bin/$cmakeExeName")
+        }
+        currentHostOs.isLinux -> {
+            commonPaths.add("/usr/bin/$cmakeExeName")
+            commonPaths.add("/usr/local/bin/$cmakeExeName")
+        }
+        currentHostOs.isWindows -> {
+            System.getenv("ProgramFiles")?.let { commonPaths.add("$it/CMake/bin/$cmakeExeName") }
+            System.getenv("ProgramFiles(x86)")?.let { commonPaths.add("$it/CMake/bin/$cmakeExeName") }
+        }
+    }
+    for (path in commonPaths) {
+        val cmakeFile = project.file(path)
+        if (cmakeFile.exists() && cmakeFile.canExecute()) {
+            logger.lifecycle("Found CMake in common system path: ${cmakeFile.absolutePath}")
+            return cmakeFile.absolutePath
+        }
+    }
+
+    logger.lifecycle("CMake not found via ANDROID_HOME, CMAKE_HOME, or common OS paths. Attempting to use '$cmakeExeName' from PATH.")
+    return cmakeExeName // Fallback to PATH
+}
+
 // Custom task to build the native library using CMake
 tasks.register<Exec>("buildNativeLib") {
     description = "Builds the native library using CMake and MinGW."
     group = "build"
     val logger = project.logger
-    println("Show me targetJdkVersion $targetJdkVersion")
-    // 使用配置的變數
-    val actualJniSourceDir = project.file(settingCmakeFolder)
+    val cmakeExecutable = findCMakeExecutable(project)
+    var makeCommand: String
+    val cmakeGenerator: String
+    var mingwGcc: String? = null
+    var mingwGpp: String? = null
 
-    workingDir = actualJniSourceDir // CMake 命令的 workingDir
-
-    commandLine(
-        "cmake",
-        "-S", ".", // Source directory (相對於 workingDir)
-        "-B",cmakeBuildDirRoot.relativeTo(actualJniSourceDir).path, // Build directory (相對於 workingDir)
-        "-G", "MinGW Makefiles",
-        // 確保這些 MinGW 路徑是正確的，或者也將它們提取為變數
-//        "-D", "CMAKE_C_COMPILER=D:/MinGW/bin/x86_64-w64-mingw32-gcc.exe",
-//        "-D", "CMAKE_CXX_COMPILER=D:/MinGW/bin/x86_64-w64-mingw32-g++.exe",
-//        "-D", "CMAKE_MAKE_PROGRAM=D:/MinGW/bin/mingw32-make.exe"
+    // Configure CMake arguments and Make command based on OS
+    val cmakeArgs = mutableListOf(
+        cmakeExecutable,
+        "-S", actualJniSourceDir.absolutePath,
+        "-B", cmakeBuildDirForCurrentOS.absolutePath,
+        "-D", "CMAKE_BUILD_TYPE=$cmakeBuildType"
     )
+
+    val javaHome = System.getenv("JAVA_HOME")
+    if (javaHome != null && javaHome.isNotBlank()) {
+        val jniHeader = Paths.get(javaHome, "include", "jni.h")
+        if (!Files.exists(jniHeader)) {
+            logger.warn("JAVA_HOME is set to '$javaHome', but jni.h not found in its include directory. CMake FindJNI might fail if not configured otherwise.")
+        }
+        cmakeArgs.add("-DJAVA_HOME_FOR_CMAKE=${javaHome.replace("\\", "/")}")
+    } else {
+        logger.warn("JAVA_HOME environment variable is not set. CMake FindJNI might fail.")
+    }
+
+    when {
+        currentHostOs.isWindows -> {
+            cmakeGenerator = "MinGW Makefiles"
+            cmakeArgs.add("-G"); cmakeArgs.add(cmakeGenerator)
+            makeCommand = "mingw32-make.exe"
+
+            val mingwHome = System.getenv("MinGW_HOME")
+            if (mingwHome != null && mingwHome.isNotBlank()) {
+                logger.lifecycle("Found MinGW_HOME: $mingwHome")
+                val mingwBin = Paths.get(mingwHome, "bin")
+                val mingwMakePath = mingwBin.resolve("mingw32-make.exe")
+                if (Files.exists(mingwMakePath) && Files.isExecutable(mingwMakePath)) {
+                    makeCommand = mingwMakePath.toString().replace("\\","/")
+                } else {
+                    logger.warn("mingw32-make.exe not found or not executable in MinGW_HOME/bin. Using default '$makeCommand'.")
+                }
+                val gccPath = mingwBin.resolve("gcc.exe")
+                val gppPath = mingwBin.resolve("g++.exe")
+                if (Files.exists(gccPath)) mingwGcc = gccPath.toString().replace("\\","/")
+                if (Files.exists(gppPath)) mingwGpp = gppPath.toString().replace("\\","/")
+            } else {
+                logger.warn("MinGW_HOME not set. Trying to use '$makeCommand' from PATH.")
+            }
+        }
+        currentHostOs.isMacOsX ||  currentHostOs.isLinux -> {
+            cmakeGenerator = "Unix Makefiles"
+            cmakeArgs.add("-G"); cmakeArgs.add(cmakeGenerator)
+            makeCommand = "make"
+        }
+        else -> throw GradleException("Unsupported operating system for native build: ${ currentHostOs.name}")
+    }
+
+    // Configure Task
+    workingDir = project.projectDir
+    commandLine(cmakeArgs)
+
+    doFirst {
+        if (!actualJniSourceDir.exists() || !actualJniSourceDir.isDirectory) {
+            throw GradleException("JNI source directory does not exist or is not a directory: ${actualJniSourceDir.absolutePath}")
+        }
+        cmakeBuildDirForCurrentOS.mkdirs()
+        logger.lifecycle("Configuring native library with CMake. Executable: $cmakeExecutable")
+        logger.lifecycle("CMake arguments: ${commandLine.joinToString(" ")}")
+    }
 
     doLast {
         exec {
@@ -64,7 +194,6 @@ tasks.register<Exec>("buildNativeLib") {
 
         println("== File Operations in doLast (Using Configurable Paths) ==")
         println("Source Directory (CMake build output): ${cmakeBuildDirRoot.absolutePath}")
-        // 需求 2: 在來源位置 (actualCmakeBuildDir) 將 lib*.dll 更名
         println("Renaming lib*.dll files in source directory (${cmakeBuildDirRoot.absolutePath}):")
         cmakeBuildDirRoot.walkTopDown().forEach { fileToRename ->
             if (fileToRename.isFile && fileToRename.name.startsWith("lib") && fileToRename.name.endsWith(".dll")) {
