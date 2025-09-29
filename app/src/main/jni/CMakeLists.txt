@@ -13,41 +13,64 @@
          # If you had other .cpp or .c files, add them here
  )
 
- # Find JNI package - this should define JNI_INCLUDE_DIRS and JNI_LIBRARIES
- # Find and link against the JNI headers and libraries (Android provided by the NDK JNI by Java)
- # For Android, log library is often useful.
  find_package(JNI)
 
- # Explicitly add JNI include directories to the target
- # 這是關鍵的補充/修正
- # Explicitly add JNI include directories to the target
- if (JNI_FOUND AND JNI_INCLUDE_DIRS) # 檢查 JNI 是否找到並且 include 路徑已設定
-     message(STATUS "Found JNI automatically. Using JNI_INCLUDE_DIRS: ${JNI_INCLUDE_DIRS}")
-     target_include_directories(HelloWorld PRIVATE ${JNI_INCLUDE_DIRS})
- else ()
-     message(WARNING "JNI_INCLUDE_DIRS not found by find_package(JNI) or JNI package itself not found. Attempting to use manually configured paths.")
-     # 手動設定 JDK 的 include 路徑
-     # 根據你的 JDK 安裝位置修改這些路徑
-     set(JDK_INCLUDE_DIR "E:/JDK/jbr-17.0.14/include") # 指向 jni.h
-     set(JDK_PLATFORM_INCLUDE_DIR "E:/JDK/jbr-17.0.14/include/win32") # 指向 jni_md.h (Windows 範例)
+ # 檢查 find_package(JNI) 是否完全成功並且定義了有效的 JNI_INCLUDE_DIRS
+ # JNI_FOUND 可能為 TRUE，但 JNI_INCLUDE_DIRS 可能包含 NOTFOUND 路徑
+ set(JNI_CONFIG_SUCCESSFUL FALSE)
+ if (JNI_FOUND AND JNI_INCLUDE_DIRS)
+     # 進一步檢查 JNI_INCLUDE_DIRS 是否真的包含了有效的路徑，而不是 -NOTFOUND
+     # 這一步比較複雜，因為 JNI_INCLUDE_DIRS 是個列表
+     # 一個簡單的檢查是，如果 JNI_INCLUDE_DIRS 中有任何一個元素包含 "NOTFOUND"
+     # 我們就認為它不完全成功。
+     set(JNI_PATHS_ARE_VALID TRUE)
+     foreach(DIR ${JNI_INCLUDE_DIRS})
+         if(DIR MATCHES "-NOTFOUND$") # 檢查是否以 -NOTFOUND 結尾
+             set(JNI_PATHS_ARE_VALID FALSE)
+             break()
+         endif()
+     endforeach()
 
-     # 檢查手動設定的路徑是否存在
-     if (NOT EXISTS "${JDK_INCLUDE_DIR}/jni.h")
-         message(FATAL_ERROR "Manual JDK_INCLUDE_DIR does not contain jni.h: ${JDK_INCLUDE_DIR}")
-     endif ()
-     if (NOT EXISTS "${JDK_PLATFORM_INCLUDE_DIR}/jni_md.h") # 根據平台調整檢查的檔案
-         message(FATAL_ERROR "Manual JDK_PLATFORM_INCLUDE_DIR does not contain jni_md.h (or equivalent): ${JDK_PLATFORM_INCLUDE_DIR}")
-     endif ()
-
-     target_include_directories(HelloWorld PRIVATE
-             "${JDK_INCLUDE_DIR}"
-             "${JDK_PLATFORM_INCLUDE_DIR}"
-     )
- endif ()
+     if(JNI_PATHS_ARE_VALID)
+         message(STATUS "Found JNI automatically by find_package(JNI). Using JNI_INCLUDE_DIRS: ${JNI_INCLUDE_DIRS}")
+         # 如果 find_package(JNI) 成功，它通常會為目標自動處理 include 目錄。
+         # 如果沒有，可以手動添加： target_include_directories(HelloWorld PRIVATE ${JNI_INCLUDE_DIRS})
+         set(JNI_CONFIG_SUCCESSFUL TRUE)
+     else()
+         message(WARNING "find_package(JNI) found JNI but JNI_INCLUDE_DIRS ('${JNI_INCLUDE_DIRS}') seem invalid. Will use Gradle paths.")
+     endif()
+ endif()
 
 
- # # Add include directories for JNI
- include_directories(${JNI_INCLUDE_DIRS})
+ if (NOT JNI_CONFIG_SUCCESSFUL)
+     message(WARNING "JNI include paths not successfully configured by find_package(JNI). Attempting to use paths from Gradle.")
+
+     # 清空可能由 find_package(JNI) 部分設置的 JNI_INCLUDE_DIRS，以避免衝突
+     # 或者確保我們不依賴它
+     unset(JNI_INCLUDE_DIRS CACHE) # 嘗試清除緩存中的 JNI_INCLUDE_DIRS
+     set(JNI_INCLUDE_DIRS "")     # 將其設置為空列表
+
+     if(DEFINED GRADLE_MANAGED_JNI_INCLUDE_DIR AND EXISTS "${GRADLE_MANAGED_JNI_INCLUDE_DIR}/jni.h")
+         message(STATUS "Using GRADLE_MANAGED_JNI_INCLUDE_DIR: ${GRADLE_MANAGED_JNI_INCLUDE_DIR}")
+         target_include_directories(HelloWorld PRIVATE "${GRADLE_MANAGED_JNI_INCLUDE_DIR}")
+         list(APPEND JNI_INCLUDE_DIRS "${GRADLE_MANAGED_JNI_INCLUDE_DIR}") # 手動填充 JNI_INCLUDE_DIRS
+     else()
+         message(WARNING "GRADLE_MANAGED_JNI_INCLUDE_DIR ('${GRADLE_MANAGED_JNI_INCLUDE_DIR}') is not defined or jni.h not found in it.")
+     endif()
+
+     if(DEFINED GRADLE_MANAGED_JNI_MD_INCLUDE_DIR AND EXISTS "${GRADLE_MANAGED_JNI_MD_INCLUDE_DIR}/jni_md.h")
+         message(STATUS "Using GRADLE_MANAGED_JNI_MD_INCLUDE_DIR: ${GRADLE_MANAGED_JNI_MD_INCLUDE_DIR}")
+         target_include_directories(HelloWorld PRIVATE "${GRADLE_MANAGED_JNI_MD_INCLUDE_DIR}")
+         list(APPEND JNI_INCLUDE_DIRS "${GRADLE_MANAGED_JNI_MD_INCLUDE_DIR}") # 手動填充 JNI_INCLUDE_DIRS
+     else()
+         message(WARNING "GRADLE_MANAGED_JNI_MD_INCLUDE_DIR ('${GRADLE_MANAGED_JNI_MD_INCLUDE_DIR}') is not defined or jni_md.h (or equivalent) not found in it.")
+     endif()
+
+     if(NOT (DEFINED GRADLE_MANAGED_JNI_INCLUDE_DIR AND EXISTS "${GRADLE_MANAGED_JNI_INCLUDE_DIR}/jni.h"))
+         message(FATAL_ERROR "Failed to configure JNI include directories via Gradle paths. Check Gradle parameters and JDK download/extraction.")
+     endif()
+     set(JNI_CONFIG_SUCCESSFUL TRUE) # 標記我們已經通過 Gradle 路徑成功配置了
+ endif()
 
  # --- 平台相關設定 ---
  # 這是交叉編譯的關鍵！我們檢查由 toolchain file 設定的 CMAKE_SYSTEM_NAME
@@ -80,17 +103,7 @@
 
  # Link JNI libraries
  if (JNI_FOUND AND JNI_LIBRARIES)
-     # 可選: 如果你的 .h 檔案在子目錄，可以新增
-     # target_include_directories(HelloWorld PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-     # In Android case, the log library found with find_library.
-     # if(log-lib)
-     #  target_link_libraries(
-     #          HelloWorld # The name of your library defined with add_library
-     #          ${log-lib} # Link the log library
-     #  )
-     # else()
-     #  message(WARNING "Android log library not found.")
-     # endif()
+     message(STATUS "Linking JNI libraries: ${JNI_LIBRARIES}")
      target_link_libraries(HelloWorld PRIVATE ${JNI_LIBRARIES})
  else ()
      # 如果 JNI 函式庫也找不到，你可能需要手動指定或讓連結器自己想辦法（不建議）

@@ -1,10 +1,12 @@
 import org.gradle.internal.os.OperatingSystem
+import de.undercouch.gradle.tasks.download.Download
 import java.nio.file.Files
 import java.nio.file.Paths
 
 plugins {
     application
     alias(libs.plugins.kotlin.jvm)
+    id("de.undercouch.download") version "5.6.0"
 }
 
 application {
@@ -13,13 +15,20 @@ application {
 
 var settingCmakeFolder : String? = "src/main/jni" // 可修改為 "src/main/cpp" 等
 var targetJdkVersion: String = JavaVersion.VERSION_17.toString()
+var settingJDKUrls = mapOf(
+    "windows" to "https://github.com/adoptium/temurin${targetJdkVersion}-binaries/releases/download/jdk-${targetJdkVersion}.0.11%2B9/OpenJDK${targetJdkVersion}U-jdk_x64_windows_hotspot_${targetJdkVersion}.0.11_9.zip",
+    "linux" to "https://github.com/adoptium/temurin${targetJdkVersion}-binaries/releases/download/jdk-${targetJdkVersion}.0.11%2B9/OpenJDK${targetJdkVersion}U-jdk_x64_linux_hotspot_${targetJdkVersion}.0.11_9.tar.gz",
+    "macos" to "https://github.com/adoptium/temurin${targetJdkVersion}-binaries/releases/download/jdk-${targetJdkVersion}.0.11%2B9/OpenJDK${targetJdkVersion}U-jdk_aarch64_mac_hotspot_${targetJdkVersion}.0.11_9.tar.gz"
+)
 var jniOutputFolder: String? = "native" // 可修改為 "libs" 等
 var cmakeBuildType: String = "Release"
+
 // --- Internal build script variables ---
+
 val currentHostOs = OperatingSystem.current()
 val actualJniSourceDir = settingCmakeFolder?.let { project.file(it) }
     ?: project.file("src/main/jni")
-
+val jdkUrls =settingJDKUrls
 val cmakeBuildDirRoot =
     project.layout.buildDirectory.dir(".cxx").get().asFile
 
@@ -33,6 +42,18 @@ val hostOsIdentifier = currentHostOs.run {
         else -> name.lowercase().replace(" ", "_") // Use lowercase() as per deprecation warning
     }
 }
+
+val targetOsForJni: String = hostOsIdentifier
+
+val currentJdkDownloadUrl: String? = jdkUrls[targetOsForJni]
+val jdkDownloadRootBaseDir =
+    project.layout.buildDirectory.dir("JDK${targetJdkVersion}").get().asFile
+val targetJdkZipDestinationDir = jdkDownloadRootBaseDir.resolve("download")
+val archiveExtension =
+    currentJdkDownloadUrl?.substringAfterLast('.') ?: "archive"
+val targetJdkArchiveFile =
+    targetJdkZipDestinationDir.resolve("${targetOsForJni}.${archiveExtension}")
+val targetJdkExtractBaseDir = jdkDownloadRootBaseDir.resolve("define/${targetOsForJni}")
 
 val osBuildIdentifier = when {
     currentHostOs.isWindows -> "windows"
@@ -111,11 +132,126 @@ fun findCMakeExecutable(project: Project): String {
     return cmakeExeName // Fallback to PATH
 }
 
+tasks.register<Download>("downloadTargetOsJdkArchive") { // Renamed task
+    description =
+        "Downloads and extracts the JDK archive for $targetOsForJni (version $targetJdkVersion) if needed for cross-compilation."
+    group = "build setup"
+
+    // Condition to run:
+    // 1. Host OS is different from Target OS (classic cross-compile scenario)
+    //    OR always run if hardcoding for test (remove `hostOsIdentifier != targetOsForJni &&` for unconditional test run)
+    // 2. A valid URL exists for the target OS
+    // (Future: Could also check if a specific toolchain file for this cross-compile pair exists)
+    onlyIf {
+        // For now, let's assume we always want to try if URL is present,
+        // and host is different, or if we are specifically testing a target.
+        // For actual cross-compilation, you'd refine this.
+        // During hardcoded testing of targetOsForJni, we might want it to always run if URL exists.
+        val shouldRun = currentJdkDownloadUrl != null
+        shouldRun
+    }
+
+    src(provider {
+        currentJdkDownloadUrl
+            ?: throw GradleException("No JDK download URL defined for target OS: $targetOsForJni")
+    })
+    dest(targetJdkArchiveFile)
+    overwrite(false)
+
+    doFirst {
+        project.logger.lifecycle("[downloadTargetOsJdkArchive.doFirst] Preparing to download JDK for $targetOsForJni (v$targetJdkVersion).")
+        project.logger.lifecycle("Download URL: $currentJdkDownloadUrl")
+        project.logger.lifecycle("Destination Archive: ${targetJdkArchiveFile.absolutePath}")
+        targetJdkZipDestinationDir.mkdirs()
+    }
+
+    doLast {
+        if (!outputs.files.singleFile.exists()) {
+            project.logger.warn("[downloadTargetOsJdkArchive.doLast] JDK for $targetOsForJni download seems to have failed or was skipped. File not found. Cannot extract.")
+            return@doLast
+        }
+        project.logger.lifecycle("[downloadTargetOsJdkArchive.doLast] Download JDK for $targetOsForJni (v$targetJdkVersion) to ${targetJdkArchiveFile.absolutePath} finish.")
+
+        if (targetJdkExtractBaseDir.exists()) {
+            targetJdkExtractBaseDir.deleteRecursively()
+        }
+        val targetIncludeDir = targetJdkExtractBaseDir.resolve("include")
+        targetIncludeDir.mkdirs()
+
+        project.logger.lifecycle("[downloadTargetOsJdkArchive.doLast] Extracting 'include' folder from ${targetJdkArchiveFile.absolutePath} to ${targetIncludeDir.absolutePath}")
+
+        project.copy {
+            val archiveFile = targetJdkArchiveFile // Closure capture
+            from(
+                if (archiveFile.name.endsWith(".zip")) {
+                    zipTree(archiveFile)
+                } else if (archiveFile.name.endsWith(".tar.gz")) {
+                    tarTree(resources.gzip(archiveFile)) // tarTree for .tar.gz
+                } else if (archiveFile.name.endsWith(".gz")) {
+                    tarTree(resources.gzip(archiveFile)) // tarTree for .tar.gz
+                } else {
+                    throw GradleException("Unsupported archive format for JDK: ${archiveFile.name}")
+                }
+            )
+            include("**/include/**") // Common pattern for JDKs
+            exclude("**/include/demo/**")
+
+            eachFile(object : org.gradle.api.Action<org.gradle.api.file.FileCopyDetails> {
+                override fun execute(details: org.gradle.api.file.FileCopyDetails) {
+                    val pathInArchive = details.relativePath.segments.joinToString("/")
+                    val includeKeyword = "include/"
+                    var relativePathToSet = pathInArchive
+                    val indexOfInclude =
+                        pathInArchive.lastIndexOf(includeKeyword) // Use lastIndexOf in case 'include' appears in top-level folder name
+
+                    if (indexOfInclude != -1) {
+                        relativePathToSet =
+                            pathInArchive.substring(indexOfInclude + includeKeyword.length)
+                    } else {
+                        details.exclude()
+                        return
+                    }
+                    if (relativePathToSet.startsWith("/")) {
+                        relativePathToSet = relativePathToSet.substring(1)
+                    }
+
+                    if (relativePathToSet.isNotEmpty()) {
+                        details.relativePath =
+                            RelativePath(true, *relativePathToSet.split("/").toTypedArray())
+                    } else {
+                        details.exclude()
+                    }
+                }
+            })
+            into(targetIncludeDir)
+            includeEmptyDirs = false
+        }
+//        project.copy {
+//            val archiveFile = targetJdkArchiveFile; from( if (archiveFile.name.endsWith(".zip")) zipTree(archiveFile) else if (archiveFile.name.endsWith(".tar.gz")) tarTree(resources.gzip(archiveFile)) else throw GradleException("Unsupported archive format for JDK: ${archiveFile.name}") ); include("**/include/**"); exclude("**/include/demo/**");
+//            eachFile(object : org.gradle.api.Action<org.gradle.api.file.FileCopyDetails> {
+//                override fun execute(details: org.gradle.api.file.FileCopyDetails) {
+//                    val pathInArchive = details.relativePath.segments.joinToString("/"); val includeKeyword = "include/"; val indexOfInclude = pathInArchive.lastIndexOf(includeKeyword);
+//                    if (indexOfInclude != -1) { var relativePathToSet = pathInArchive.substring(indexOfInclude + includeKeyword.length); if (relativePathToSet.startsWith("/")) { relativePathToSet = relativePathToSet.substring(1) }; if (relativePathToSet.isNotEmpty()) { details.relativePath = org.gradle.api.file.RelativePath(true, *relativePathToSet.split("/").toTypedArray()) } else { details.exclude() }
+//                    } else { details.exclude(); return }
+//                }
+//            }); into(targetIncludeDir); includeEmptyDirs = false
+//        }
+
+        project.logger.lifecycle("[downloadTargetOsJdkArchive.doLast] Extraction to ${targetIncludeDir.absolutePath} complete.")
+        if (targetIncludeDir.resolve("jni.h").exists()) {
+            project.logger.lifecycle("[downloadTargetOsJdkArchive.doLast] Extraction verified for $targetOsForJni. Found jni.h.")
+        } else {
+            project.logger.warn("[downloadTargetOsJdkArchive.doLast] Post-extraction for $targetOsForJni verification failed to find jni.h in ${targetIncludeDir.absolutePath}.")
+        }
+    }
+}
+
 // Custom task to build the native library using CMake
 tasks.register<Exec>("buildNativeLib") {
     description = "Builds the native library using CMake and MinGW."
     group = "build"
     val logger = project.logger
+    dependsOn("downloadTargetOsJdkArchive")
     val cmakeExecutable = findCMakeExecutable(project)
     var makeCommand: String
     val cmakeGenerator: String
@@ -130,16 +266,22 @@ tasks.register<Exec>("buildNativeLib") {
         "-D", "CMAKE_BUILD_TYPE=$cmakeBuildType"
     )
 
-    val javaHome = System.getenv("JAVA_HOME")
-    if (javaHome != null && javaHome.isNotBlank()) {
-        val jniHeader = Paths.get(javaHome, "include", "jni.h")
-        if (!Files.exists(jniHeader)) {
-            logger.warn("JAVA_HOME is set to '$javaHome', but jni.h not found in its include directory. CMake FindJNI might fail if not configured otherwise.")
+    val gradleManagedJniIncludeDir = targetJdkExtractBaseDir.resolve("include")
+    val platformSpecificIncludeSubDir = when (targetOsForJni) {
+        "linux" -> "linux"
+        "windows" -> "win32"
+        "macos" -> "darwin"
+        else -> {
+            logger.warn("Unknown target OS '$targetOsForJni' for determining jni_md.h subdirectory. Using target name directly.")
+            targetOsForJni
         }
-        cmakeArgs.add("-DJAVA_HOME_FOR_CMAKE=${javaHome.replace("\\", "/")}")
-    } else {
-        logger.warn("JAVA_HOME environment variable is not set. CMake FindJNI might fail.")
     }
+    val gradleManagedJniMdIncludeDir = gradleManagedJniIncludeDir.resolve(platformSpecificIncludeSubDir)
+    cmakeArgs.add("-DGRADLE_MANAGED_JNI_INCLUDE_DIR=${gradleManagedJniIncludeDir.absolutePath.replace("\\", "/")}")
+    cmakeArgs.add("-DGRADLE_MANAGED_JNI_MD_INCLUDE_DIR=${gradleManagedJniMdIncludeDir.absolutePath.replace("\\", "/")}")
+    logger.lifecycle("[Build Config] Adding to cmakeArgs: -DGRADLE_MANAGED_JNI_INCLUDE_DIR='${gradleManagedJniIncludeDir.absolutePath.replace("\\", "/")}'")
+    logger.lifecycle("[Build Config] Adding to cmakeArgs: -DGRADLE_MANAGED_JNI_MD_INCLUDE_DIR='${gradleManagedJniMdIncludeDir.absolutePath.replace("\\", "/")}'")
+
 
     when {
         currentHostOs.isWindows -> {
@@ -184,6 +326,11 @@ tasks.register<Exec>("buildNativeLib") {
         cmakeBuildDirForCurrentOS.mkdirs()
         logger.lifecycle("Configuring native library with CMake. Executable: $cmakeExecutable")
         logger.lifecycle("CMake arguments: ${commandLine.joinToString(" ")}")
+        cmakeArgs.forEach { logger.lifecycle("  $it") } // 打印最終的 cmakeArgs
+        commandLine(cmakeArgs.first()) // cmakeExecutable
+        args(cmakeArgs.drop(1))       // cmakeExecutable 之後的參數
+        standardOutput = System.out
+        errorOutput = System.err
     }
 
     doLast {
