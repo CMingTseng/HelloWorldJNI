@@ -32,8 +32,6 @@ val jdkUrls =settingJDKUrls
 val cmakeBuildDirRoot =
     project.layout.buildDirectory.dir(".cxx").get().asFile
 
-val cmakeBuildDirForCurrentOS = cmakeBuildDirRoot//
-
 val hostOsIdentifier = currentHostOs.run {
     when {
         isWindows -> "windows"
@@ -57,10 +55,18 @@ val targetJdkExtractBaseDir = jdkDownloadRootBaseDir.resolve("define/${targetOsF
 
 val osBuildIdentifier = when {
     currentHostOs.isWindows -> "windows"
-    currentHostOs.isMacOsX -> "macos"
+    currentHostOs.isMacOsX -> "darwin"
     currentHostOs.isLinux -> "linux"
     else -> currentHostOs.name.toLowerCase().replace(" ", "_")
 }
+
+val targetOsBuildIdentifier = when (targetOsForJni) { // 根據 targetOsForJni 決定 JNI include 子目錄的名稱
+    "windows" -> "win32"
+    "macos" -> "darwin"
+    "linux" -> "linux"
+    else -> targetOsForJni.toLowerCase().replace(" ", "_")
+}
+
 
 // --- CMake Executable Finder ---
 fun findCMakeExecutable(project: Project): String {
@@ -175,10 +181,16 @@ tasks.register<Download>("downloadTargetOsJdkArchive") { // Renamed task
         if (targetJdkExtractBaseDir.exists()) {
             targetJdkExtractBaseDir.deleteRecursively()
         }
-        val targetIncludeDir = targetJdkExtractBaseDir.resolve("include")
-        targetIncludeDir.mkdirs()
+        // targetJdkExtractBaseDir 是 define/<targetOsForJni>
+        // actualExtractDirForIncludes 是 define/<targetOsForJni>/include
+        val actualExtractDirForIncludes = targetJdkExtractBaseDir.resolve("include")
 
-        project.logger.lifecycle("[downloadTargetOsJdkArchive.doLast] Extracting 'include' folder from ${targetJdkArchiveFile.absolutePath} to ${targetIncludeDir.absolutePath}")
+        if (targetJdkExtractBaseDir.exists()) {
+            targetJdkExtractBaseDir.deleteRecursively()
+        }
+        actualExtractDirForIncludes.mkdirs() // 確保 include 目錄存在
+
+        project.logger.lifecycle("[downloadTargetOsJdkArchive.doLast] Extracting 'include' folder from ${targetJdkArchiveFile.absolutePath} to ${actualExtractDirForIncludes.absolutePath}")
 
         project.copy {
             val archiveFile = targetJdkArchiveFile // Closure capture
@@ -223,7 +235,7 @@ tasks.register<Download>("downloadTargetOsJdkArchive") { // Renamed task
                     }
                 }
             })
-            into(targetIncludeDir)
+            into(actualExtractDirForIncludes)
             includeEmptyDirs = false
         }
 //        project.copy {
@@ -237,11 +249,21 @@ tasks.register<Download>("downloadTargetOsJdkArchive") { // Renamed task
 //            }); into(targetIncludeDir); includeEmptyDirs = false
 //        }
 
-        project.logger.lifecycle("[downloadTargetOsJdkArchive.doLast] Extraction to ${targetIncludeDir.absolutePath} complete.")
-        if (targetIncludeDir.resolve("jni.h").exists()) {
-            project.logger.lifecycle("[downloadTargetOsJdkArchive.doLast] Extraction verified for $targetOsForJni. Found jni.h.")
+        project.logger.lifecycle("[downloadTargetOsJdkArchive.doLast] Extraction to ${actualExtractDirForIncludes.absolutePath} complete.")
+        // Verification after extraction
+        val jniH = actualExtractDirForIncludes.resolve("jni.h")
+        val jniMdHDir = actualExtractDirForIncludes.resolve(targetOsBuildIdentifier) // 使用 targetOsBuildIdentifier
+        val jniMdH = jniMdHDir.resolve("jni_md.h")
+
+        if (jniH.exists()) {
+            project.logger.lifecycle("[downloadTargetOsJdkArchive.doLast] Extraction verified for $targetOsForJni. Found jni.h in ${jniH.absolutePath}.")
         } else {
-            project.logger.warn("[downloadTargetOsJdkArchive.doLast] Post-extraction for $targetOsForJni verification failed to find jni.h in ${targetIncludeDir.absolutePath}.")
+            project.logger.error("[downloadTargetOsJdkArchive.doLast] ERROR: jni.h NOT found in ${jniH.absolutePath} after extraction for $targetOsForJni.")
+        }
+        if (jniMdH.exists()) {
+            project.logger.lifecycle("[downloadTargetOsJdkArchive.doLast] Extraction verified for $targetOsForJni. Found jni_md.h in ${jniMdH.absolutePath}.")
+        } else {
+            project.logger.warn("[downloadTargetOsJdkArchive.doLast] WARNING: jni_md.h NOT found in ${jniMdH.absolutePath} (expected subdir: $targetOsBuildIdentifier). This might be an issue if jni.h requires it from a specific relative path.")
         }
     }
 }
@@ -253,91 +275,122 @@ tasks.register<Exec>("buildNativeLib") {
     val logger = project.logger
     dependsOn("downloadTargetOsJdkArchive")
     val cmakeExecutable = findCMakeExecutable(project)
-    var makeCommand: String
-    val cmakeGenerator: String
-    var mingwGcc: String? = null
-    var mingwGpp: String? = null
+    val isNativeBuildOnHost = (targetOsForJni == hostOsIdentifier)
+    val cmakeBuildDirForTarget = if (isNativeBuildOnHost){cmakeBuildDirRoot}else{cmakeBuildDirRoot.resolve(targetOsForJni)}
 
-    // Configure CMake arguments and Make command based on OS
-    val cmakeArgs = mutableListOf(
-        cmakeExecutable,
-        "-S", actualJniSourceDir.absolutePath,
-        "-B", cmakeBuildDirForCurrentOS.absolutePath,
-        "-D", "CMAKE_BUILD_TYPE=$cmakeBuildType"
-    )
+    val extractedJdkIncludeDir = targetJdkExtractBaseDir.resolve("include")
+    val jniIncludeDir = extractedJdkIncludeDir.absolutePath
+    val jniMdIncludeDir = extractedJdkIncludeDir.resolve(targetOsBuildIdentifier).absolutePath
 
-    val gradleManagedJniIncludeDir = targetJdkExtractBaseDir.resolve("include")
-    val platformSpecificIncludeSubDir = when (targetOsForJni) {
-        "linux" -> "linux"
-        "windows" -> "win32"
-        "macos" -> "darwin"
-        else -> {
-            logger.warn("Unknown target OS '$targetOsForJni' for determining jni_md.h subdirectory. Using target name directly.")
-            targetOsForJni
-        }
-    }
-    val gradleManagedJniMdIncludeDir = gradleManagedJniIncludeDir.resolve(platformSpecificIncludeSubDir)
-    cmakeArgs.add("-DGRADLE_MANAGED_JNI_INCLUDE_DIR=${gradleManagedJniIncludeDir.absolutePath.replace("\\", "/")}")
-    cmakeArgs.add("-DGRADLE_MANAGED_JNI_MD_INCLUDE_DIR=${gradleManagedJniMdIncludeDir.absolutePath.replace("\\", "/")}")
-    logger.lifecycle("[Build Config] Adding to cmakeArgs: -DGRADLE_MANAGED_JNI_INCLUDE_DIR='${gradleManagedJniIncludeDir.absolutePath.replace("\\", "/")}'")
-    logger.lifecycle("[Build Config] Adding to cmakeArgs: -DGRADLE_MANAGED_JNI_MD_INCLUDE_DIR='${gradleManagedJniMdIncludeDir.absolutePath.replace("\\", "/")}'")
+    workingDir(cmakeBuildDirForTarget)
 
+    val cmakeArgs = mutableListOf<String>()
+    cmakeArgs.add("-S")
+    cmakeArgs.add(actualJniSourceDir.absolutePath)
+    cmakeArgs.add("-B")
+    cmakeArgs.add(cmakeBuildDirForTarget.absolutePath)
+    cmakeArgs.add("-DCMAKE_BUILD_TYPE=${cmakeBuildType}")
+    cmakeArgs.add("-DGRADLE_MANAGED_JNI_INCLUDE_DIR=${jniIncludeDir}")
+    logger.lifecycle("[buildNativeLib] Will pass to CMake: GRADLE_MANAGED_JNI_INCLUDE_DIR=${jniIncludeDir}")
+    cmakeArgs.add("-DGRADLE_MANAGED_JNI_MD_INCLUDE_DIR=${jniMdIncludeDir}")
+    logger.lifecycle("[buildNativeLib] Will pass to CMake: GRADLE_MANAGED_JNI_MD_INCLUDE_DIR=${jniMdIncludeDir}")
 
-    when {
-        currentHostOs.isWindows -> {
-            cmakeGenerator = "MinGW Makefiles"
-            cmakeArgs.add("-G"); cmakeArgs.add(cmakeGenerator)
-            makeCommand = "mingw32-make.exe"
+    val toolchainFileDir = actualJniSourceDir.resolve("toolchains")
 
-            val mingwHome = System.getenv("MinGW_HOME")
-            if (mingwHome != null && mingwHome.isNotBlank()) {
-                logger.lifecycle("Found MinGW_HOME: $mingwHome")
-                val mingwBin = Paths.get(mingwHome, "bin")
-                val mingwMakePath = mingwBin.resolve("mingw32-make.exe")
-                if (Files.exists(mingwMakePath) && Files.isExecutable(mingwMakePath)) {
-                    makeCommand = mingwMakePath.toString().replace("\\","/")
-                } else {
-                    logger.warn("mingw32-make.exe not found or not executable in MinGW_HOME/bin. Using default '$makeCommand'.")
-                }
-                val gccPath = mingwBin.resolve("gcc.exe")
-                val gppPath = mingwBin.resolve("g++.exe")
-                if (Files.exists(gccPath)) mingwGcc = gccPath.toString().replace("\\","/")
-                if (Files.exists(gppPath)) mingwGpp = gppPath.toString().replace("\\","/")
-            } else {
-                logger.warn("MinGW_HOME not set. Trying to use '$makeCommand' from PATH.")
+    when(hostOsIdentifier){
+        "windows" -> {
+            if (targetOsForJni=="windows"){
+                logger.lifecycle("[buildNativeLib] Host is Windows, target is Windows. Configuring for MinGW Makefiles.")
+                cmakeArgs.add("-G")
+                cmakeArgs.add("MinGW Makefiles")
+            }else if(targetOsForJni=="macos"){
+                //TODO: Cross-compile Windows -> macOS
+            }else if(targetOsForJni=="linux"){
+                //TODO: Cross-compile Windows -> Linux
             }
         }
-        currentHostOs.isMacOsX ||  currentHostOs.isLinux -> {
-            cmakeGenerator = "Unix Makefiles"
-            cmakeArgs.add("-G"); cmakeArgs.add(cmakeGenerator)
-            makeCommand = "make"
+        "linux" -> {
+            if (targetOsForJni=="windows"){
+                //TODO: Cross-compile Linux -> Windows
+            }else if(targetOsForJni=="macos"){
+                //TODO: Cross-compile Linux -> macOS
+            }else if(targetOsForJni=="linux"){
+                cmakeArgs.add("-G");
+                cmakeArgs.add("Unix Makefiles")
+            }
         }
-        else -> throw GradleException("Unsupported operating system for native build: ${ currentHostOs.name}")
+        "macos"->{
+            if (targetOsForJni=="windows"){
+                //TODO: Cross-compile macOS -> Windows
+            }else if(targetOsForJni=="macos"){
+                logger.lifecycle("[buildNativeLib] Host is macOS, target is macOS.")
+                cmakeArgs.add("-G");
+                cmakeArgs.add("Unix Makefiles")
+                val macosToolchainFile = toolchainFileDir.resolve("toolchain-macos.cmake")
+                if (macosToolchainFile.exists()) {
+                    logger.lifecycle("[buildNativeLib] Toolchain file '${macosToolchainFile.name}' exists. Applying for native macOS build.")
+                    cmakeArgs.add("-DCMAKE_TOOLCHAIN_FILE=${macosToolchainFile.absolutePath}")
+                } else {
+                    logger.lifecycle("[buildNativeLib] Toolchain file '${macosToolchainFile.name}' does NOT exist. Relying on system CMake for native macOS build.")
+                }
+            }else if(targetOsForJni=="linux"){
+                //TODO: Cross-compile macOS -> Linux
+            }
+        }
     }
 
-    // Configure Task
-    workingDir = project.projectDir
-    commandLine(cmakeArgs)
+    // Set the command line for the Exec task
+    // The first element is the command, subsequent elements are its arguments.
+    commandLine = listOf(cmakeExecutable) + cmakeArgs // Crucial change here
 
     doFirst {
-        if (!actualJniSourceDir.exists() || !actualJniSourceDir.isDirectory) {
-            throw GradleException("JNI source directory does not exist or is not a directory: ${actualJniSourceDir.absolutePath}")
+        cmakeBuildDirForTarget.mkdirs()
+        logger.lifecycle("[buildNativeLib.doFirst] CMake build directory for target '$targetOsForJni': ${cmakeBuildDirForTarget.absolutePath}")
+        logger.lifecycle("[buildNativeLib.doFirst] Configuring native library with CMake. Executable: $cmakeExecutable")
+        logger.lifecycle("[buildNativeLib.doFirst] Full command to be executed: ${commandLine.joinToString(" ")}")
+        logger.lifecycle("[buildNativeLib.doFirst] CMake arguments (excluding executable):")
+        commandLine.drop(1).forEach { arg -> logger.lifecycle("  $arg") }
+        val checkFile = project.file(jniMdIncludeDir).resolve("jni_md.h")
+        if (!checkFile.exists()) {
+            logger.warn("[buildNativeLib.doFirst] WARNING: jni_md.h still not found at ${checkFile.absolutePath} right before CMake execution.")
+        } else {
+            logger.lifecycle("[buildNativeLib.doFirst] Confirmed jni_md.h exists at ${checkFile.absolutePath} right before CMake execution.")
         }
-        cmakeBuildDirForCurrentOS.mkdirs()
-        logger.lifecycle("Configuring native library with CMake. Executable: $cmakeExecutable")
-        logger.lifecycle("CMake arguments: ${commandLine.joinToString(" ")}")
-        cmakeArgs.forEach { logger.lifecycle("  $it") } // 打印最終的 cmakeArgs
-        commandLine(cmakeArgs.first()) // cmakeExecutable
-        args(cmakeArgs.drop(1))       // cmakeExecutable 之後的參數
-        standardOutput = System.out
-        errorOutput = System.err
     }
 
+
     doLast {
-        exec {
-            workingDir = cmakeBuildDirRoot // make 命令的 workingDir
-            commandLine("mingw32-make")
+        // CMake configuration step (which was the main part of the Exec task) should have completed by now.
+        // Check executionResult for the configure step
+        if (executionResult.get().exitValue != 0) {
+            logger.error("[buildNativeLib.doLast] CMake configuration FAILED for $targetOsForJni. Exit value: ${executionResult.get().exitValue}")
+            throw RuntimeException("CMake configuration failed for $targetOsForJni. See logs for details.")
         }
+        logger.lifecycle("[buildNativeLib.doLast] CMake configuration for $targetOsForJni successful.")
+
+        // --- Build Step (e.g., make or ninja) ---
+        val makeCommand = when {
+            // For now, assume 'make' is universally available or configured by CMake for the chosen generator.
+            // A more robust solution might inspect CMakeCache.txt for CMAKE_MAKE_PROGRAM or CMAKE_GENERATOR.
+            // For simplicity and adhering to "minimal changes" request, we'll stick to 'make'.
+            else -> "make"
+        }
+        try {
+            project.exec {
+                workingDir(cmakeBuildDirForTarget) // make 命令的 workingDir
+                commandLine(makeCommand)
+                logger.lifecycle("[buildNativeLib.doLast] Executing: $makeCommand in ${cmakeBuildDirForTarget.absolutePath}")
+            }
+            logger.lifecycle("[buildNativeLib.doLast] Build step ($makeCommand) completed successfully.")
+        } catch (e: Exception) {
+            logger.error("[buildNativeLib.doLast] Build step ($makeCommand) FAILED in ${cmakeBuildDirForTarget.absolutePath}. Error: ${e.message}", e)
+            throw e // 重新拋出異常以使任務失敗
+        }
+
+
+        // --- 原有的 doLast 內容 (檔案操作) ---
+        logger.lifecycle("[buildNativeLib.doLast] Starting post-build file operations.")
+        println("== File Operations in doLast (Using Configurable Paths) ==")
 
         println("== File Operations in doLast (Using Configurable Paths) ==")
         println("Source Directory (CMake build output): ${cmakeBuildDirRoot.absolutePath}")

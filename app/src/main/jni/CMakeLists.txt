@@ -1,123 +1,98 @@
  cmake_minimum_required(VERSION 3.10)
 
- # Project name (can be anything, doesn't directly affect output library name for add_library)
- project(JniDllExample CXX)
-#TODO add_library must before target_include_directories
- # Add the C++ source file for the native library.
- # The library will be named "libHelloWorld.so" (or .dylib, .dll depending on platform if not Android)
- # The first argument to add_library ("HelloWorld") is what System.loadLibrary("HelloWorld") expects.
- add_library(
-         HelloWorld # This is the name used in System.loadLibrary("HelloWorld")
-         SHARED  # Creates a shared library (DLL on Windows,/ .so file for Android)
-         HelloWorld.cpp
-         # If you had other .cpp or .c files, add them here
- )
+project(JniDllExample CXX)
 
- find_package(JNI)
+add_library(
+        HelloWorld # This is the name used in System.loadLibrary("HelloWorld")
+        SHARED
+        HelloWorld.cpp
+)
 
- # 檢查 find_package(JNI) 是否完全成功並且定義了有效的 JNI_INCLUDE_DIRS
- # JNI_FOUND 可能為 TRUE，但 JNI_INCLUDE_DIRS 可能包含 NOTFOUND 路徑
- set(JNI_CONFIG_SUCCESSFUL FALSE)
- if (JNI_FOUND AND JNI_INCLUDE_DIRS)
-     # 進一步檢查 JNI_INCLUDE_DIRS 是否真的包含了有效的路徑，而不是 -NOTFOUND
-     # 這一步比較複雜，因為 JNI_INCLUDE_DIRS 是個列表
-     # 一個簡單的檢查是，如果 JNI_INCLUDE_DIRS 中有任何一個元素包含 "NOTFOUND"
-     # 我們就認為它不完全成功。
-     set(JNI_PATHS_ARE_VALID TRUE)
-     foreach(DIR ${JNI_INCLUDE_DIRS})
-         if(DIR MATCHES "-NOTFOUND$") # 檢查是否以 -NOTFOUND 結尾
-             set(JNI_PATHS_ARE_VALID FALSE)
-             break()
-         endif()
-     endforeach()
+message(STATUS "Project Name: ${PROJECT_NAME}")
 
-     if(JNI_PATHS_ARE_VALID)
-         message(STATUS "Found JNI automatically by find_package(JNI). Using JNI_INCLUDE_DIRS: ${JNI_INCLUDE_DIRS}")
-         # 如果 find_package(JNI) 成功，它通常會為目標自動處理 include 目錄。
-         # 如果沒有，可以手動添加： target_include_directories(HelloWorld PRIVATE ${JNI_INCLUDE_DIRS})
-         set(JNI_CONFIG_SUCCESSFUL TRUE)
-     else()
-         message(WARNING "find_package(JNI) found JNI but JNI_INCLUDE_DIRS ('${JNI_INCLUDE_DIRS}') seem invalid. Will use Gradle paths.")
-     endif()
- endif()
+message(STATUS "Library Name (target): HelloWorld")
+
+message(STATUS "--- JNI Include Path Configuration (CMakeLists.txt) ---")
+message(STATUS "Received GRADLE_MANAGED_JNI_INCLUDE_DIR: [${GRADLE_MANAGED_JNI_INCLUDE_DIR}]")
+message(STATUS "Received GRADLE_MANAGED_JNI_MD_INCLUDE_DIR: [${GRADLE_MANAGED_JNI_MD_INCLUDE_DIR}]")
+
+# 主要 JNI include 目錄
+if(NOT DEFINED GRADLE_MANAGED_JNI_INCLUDE_DIR OR GRADLE_MANAGED_JNI_INCLUDE_DIR STREQUAL "")
+    message(FATAL_ERROR "GRADLE_MANAGED_JNI_INCLUDE_DIR is not defined or is empty from Gradle.")
+elseif(NOT EXISTS "${GRADLE_MANAGED_JNI_INCLUDE_DIR}/jni.h")
+    message(FATAL_ERROR "jni.h not found in GRADLE_MANAGED_JNI_INCLUDE_DIR: ${GRADLE_MANAGED_JNI_INCLUDE_DIR}/jni.h. Check Gradle parameters.")
+else()
+    target_include_directories(HelloWorld PRIVATE "${GRADLE_MANAGED_JNI_INCLUDE_DIR}")
+    message(STATUS "SUCCESS: Added main JNI include directory: ${GRADLE_MANAGED_JNI_INCLUDE_DIR}")
+endif()
+
+# 平台特定的 jni_md.h 目錄
+set(JNI_MD_DIR_MESSAGE "INFO: GRADLE_MANAGED_JNI_MD_INCLUDE_DIR evaluation: ")
+if(DEFINED GRADLE_MANAGED_JNI_MD_INCLUDE_DIR AND NOT GRADLE_MANAGED_JNI_MD_INCLUDE_DIR STREQUAL "")
+    string(APPEND JNI_MD_DIR_MESSAGE "Was defined and NOT EMPTY: [${GRADLE_MANAGED_JNI_MD_INCLUDE_DIR}]. ")
+    # *** 關鍵檢查點在 CMakeLists.txt ***
+    if(EXISTS "${GRADLE_MANAGED_JNI_MD_INCLUDE_DIR}/jni_md.h")
+        target_include_directories(HelloWorld PRIVATE "${GRADLE_MANAGED_JNI_MD_INCLUDE_DIR}")
+        string(APPEND JNI_MD_DIR_MESSAGE "SUCCESS: jni_md.h found. Added JNI machine-dependent include directory: ${GRADLE_MANAGED_JNI_MD_INCLUDE_DIR}")
+    else()
+        string(APPEND JNI_MD_DIR_MESSAGE "WARNING: jni_md.h NOT found in specified GRADLE_MANAGED_JNI_MD_INCLUDE_DIR: ${GRADLE_MANAGED_JNI_MD_INCLUDE_DIR}. Compilation might fail if jni.h references it directly and it's not in another include path.")
+    endif()
+else()
+    string(APPEND JNI_MD_DIR_MESSAGE "Was NOT DEFINED or was EMPTY by Gradle. ")
+    # 如果 Gradle 沒有提供 GRADLE_MANAGED_JNI_MD_INCLUDE_DIR，
+    # 那麼 jni.h 必須能夠在其自身的相對路徑中找到 jni_md.h (例如，在 GRADLE_MANAGED_JNI_INCLUDE_DIR 下的 darwin/jni_md.h)
+    # 這種情況下，不需要額外添加 include 目錄，因為 jni.h 內部會處理相對路徑。
+    # 但是，如果 jni.h 找不到，編譯仍然會失敗。
+    # 這裡的 CMake 腳本主要負責將 Gradle 提供的路徑加入。
+    if(EXISTS "${GRADLE_MANAGED_JNI_INCLUDE_DIR}/${CMAKE_SYSTEM_NAME_LOWER}/jni_md.h") # 嘗試猜測，CMAKE_SYSTEM_NAME_LOWER 可能需要調整
+        message(STATUS "INFO: Found jni_md.h in a subdirectory of main include: ${GRADLE_MANAGED_JNI_INCLUDE_DIR}/${CMAKE_SYSTEM_NAME_LOWER}/jni_md.h. This might be picked up automatically by jni.h.")
+    elseif(EXISTS "${GRADLE_MANAGED_JNI_INCLUDE_DIR}/jni_md.h")
+        message(STATUS "INFO: Found jni_md.h directly in main include: ${GRADLE_MANAGED_JNI_INCLUDE_DIR}/jni_md.h.")
+    else()
+        message(WARNING "WARNING: GRADLE_MANAGED_JNI_MD_INCLUDE_DIR was not provided, and jni_md.h was not found in common relative locations to the main JNI include directory. Compilation might fail if jni.h requires it.")
+    endif()
+endif()
+message(STATUS "${JNI_MD_DIR_MESSAGE}")
+message(STATUS "--- End JNI Include Path Configuration ---")
 
 
- if (NOT JNI_CONFIG_SUCCESSFUL)
-     message(WARNING "JNI include paths not successfully configured by find_package(JNI). Attempting to use paths from Gradle.")
+# 函式庫命名邏輯 (保持不變)
+if (CMAKE_SYSTEM_NAME STREQUAL "Windows" OR (NOT CMAKE_SYSTEM_NAME AND WIN32))
+    set(LIB_EXTENSION ".dll")
+    set_target_properties(HelloWorld PROPERTIES PREFIX "")
+    set_target_properties(HelloWorld PROPERTIES OUTPUT_NAME "HelloWorld")
+    set_target_properties(HelloWorld PROPERTIES SUFFIX ${LIB_EXTENSION})
+    message(STATUS "Targeting Windows. Library name: HelloWorld${LIB_EXTENSION}")
+elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR (NOT CMAKE_SYSTEM_NAME AND UNIX AND NOT APPLE))
+    set(LIB_EXTENSION ".so")
+    set_target_properties(HelloWorld PROPERTIES PREFIX "lib")
+    set_target_properties(HelloWorld PROPERTIES OUTPUT_NAME "HelloWorld")
+    set_target_properties(HelloWorld PROPERTIES SUFFIX ${LIB_EXTENSION})
+    message(STATUS "Targeting Linux. Library name: libHelloWorld${LIB_EXTENSION}")
+elseif (CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR (NOT CMAKE_SYSTEM_NAME AND APPLE)) # macOS
+    set(LIB_EXTENSION ".dylib")
+    set_target_properties(HelloWorld PROPERTIES PREFIX "lib")
+    set_target_properties(HelloWorld PROPERTIES OUTPUT_NAME "HelloWorld")
+    set_target_properties(HelloWorld PROPERTIES SUFFIX ${LIB_EXTENSION})
+    message(STATUS "Targeting macOS. Library name: libHelloWorld${LIB_EXTENSION}")
+else()
+    message(WARNING "Could not determine target system for library naming conventions (CMAKE_SYSTEM_NAME: '${CMAKE_SYSTEM_NAME}'). Using default naming.")
+    if(WIN32)
+        set_target_properties(HelloWorld PROPERTIES PREFIX "")
+        set_target_properties(HelloWorld PROPERTIES OUTPUT_NAME "HelloWorld")
+        set_target_properties(HelloWorld PROPERTIES SUFFIX ".dll")
+    elseif(UNIX)
+        set_target_properties(HelloWorld PROPERTIES PREFIX "lib")
+        set_target_properties(HelloWorld PROPERTIES OUTPUT_NAME "HelloWorld")
+        if(APPLE)
+            set_target_properties(HelloWorld PROPERTIES SUFFIX ".dylib")
+        else()
+            set_target_properties(HelloWorld PROPERTIES SUFFIX ".so")
+        endif()
+    endif()
+endif()
 
-     # 清空可能由 find_package(JNI) 部分設置的 JNI_INCLUDE_DIRS，以避免衝突
-     # 或者確保我們不依賴它
-     unset(JNI_INCLUDE_DIRS CACHE) # 嘗試清除緩存中的 JNI_INCLUDE_DIRS
-     set(JNI_INCLUDE_DIRS "")     # 將其設置為空列表
-
-     if(DEFINED GRADLE_MANAGED_JNI_INCLUDE_DIR AND EXISTS "${GRADLE_MANAGED_JNI_INCLUDE_DIR}/jni.h")
-         message(STATUS "Using GRADLE_MANAGED_JNI_INCLUDE_DIR: ${GRADLE_MANAGED_JNI_INCLUDE_DIR}")
-         target_include_directories(HelloWorld PRIVATE "${GRADLE_MANAGED_JNI_INCLUDE_DIR}")
-         list(APPEND JNI_INCLUDE_DIRS "${GRADLE_MANAGED_JNI_INCLUDE_DIR}") # 手動填充 JNI_INCLUDE_DIRS
-     else()
-         message(WARNING "GRADLE_MANAGED_JNI_INCLUDE_DIR ('${GRADLE_MANAGED_JNI_INCLUDE_DIR}') is not defined or jni.h not found in it.")
-     endif()
-
-     if(DEFINED GRADLE_MANAGED_JNI_MD_INCLUDE_DIR AND EXISTS "${GRADLE_MANAGED_JNI_MD_INCLUDE_DIR}/jni_md.h")
-         message(STATUS "Using GRADLE_MANAGED_JNI_MD_INCLUDE_DIR: ${GRADLE_MANAGED_JNI_MD_INCLUDE_DIR}")
-         target_include_directories(HelloWorld PRIVATE "${GRADLE_MANAGED_JNI_MD_INCLUDE_DIR}")
-         list(APPEND JNI_INCLUDE_DIRS "${GRADLE_MANAGED_JNI_MD_INCLUDE_DIR}") # 手動填充 JNI_INCLUDE_DIRS
-     else()
-         message(WARNING "GRADLE_MANAGED_JNI_MD_INCLUDE_DIR ('${GRADLE_MANAGED_JNI_MD_INCLUDE_DIR}') is not defined or jni_md.h (or equivalent) not found in it.")
-     endif()
-
-     if(NOT (DEFINED GRADLE_MANAGED_JNI_INCLUDE_DIR AND EXISTS "${GRADLE_MANAGED_JNI_INCLUDE_DIR}/jni.h"))
-         message(FATAL_ERROR "Failed to configure JNI include directories via Gradle paths. Check Gradle parameters and JDK download/extraction.")
-     endif()
-     set(JNI_CONFIG_SUCCESSFUL TRUE) # 標記我們已經通過 Gradle 路徑成功配置了
- endif()
-
- # --- 平台相關設定 ---
- # 這是交叉編譯的關鍵！我們檢查由 toolchain file 設定的 CMAKE_SYSTEM_NAME
- if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
-     set(LIB_EXTENSION "dll")
-     set(JVM_SUB_DIR "win32")
- elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux")
-     set(LIB_EXTENSION "so")
-     set(JVM_SUB_DIR "linux")
- elseif (CMAKE_SYSTEM_NAME STREQUAL "Darwin") # Darwin 是 macOS 的核心名稱
-     set(LIB_EXTENSION "dylib")
-     set(JVM_SUB_DIR "darwin")
- else ()
-     # 如果沒有 toolchain file，就偵測當前主機系統
-     if (WIN32)
-         set(LIB_EXTENSION "dll")
-         set(JVM_SUB_DIR "win32")
-     elseif (UNIX AND NOT APPLE)
-         set(LIB_EXTENSION "so")
-         set(JVM_SUB_DIR "linux")
-     elseif (APPLE)
-         set(LIB_EXTENSION "dylib")
-         set(JVM_SUB_DIR "darwin")
-     endif ()
- endif ()
-
- message(STATUS "Target System: ${CMAKE_SYSTEM_NAME}")
- message(STATUS "Output Library: ${TARGET_NAME}.${LIB_EXTENSION}")
- message(STATUS "Java Headers: ${JAVA_HOME}/include/${JVM_SUB_DIR}")
-
- # Link JNI libraries
- if (JNI_FOUND AND JNI_LIBRARIES)
-     message(STATUS "Linking JNI libraries: ${JNI_LIBRARIES}")
-     target_link_libraries(HelloWorld PRIVATE ${JNI_LIBRARIES})
- else ()
-     # 如果 JNI 函式庫也找不到，你可能需要手動指定或讓連結器自己想辦法（不建議）
-     message(WARNING "JNI_LIBRARIES not found or JNI package not found. Linking might require manual setup or might fail.")
-     # 例如: target_link_libraries(HelloWorld PRIVATE "path/to/jvm.lib")
- endif ()
-
- # You typically don't need to manually find JNI for Android NDK builds,
- # as the NDK toolchain configures JNI headers automatically.
- # find_package(JNI REQUIRED)
- # include_directories(${JNI_INCLUDE_DIRS})
- # target_link_libraries(HelloWorld ${JNI_LIBRARIES})
- # The above 3 lines are usually not needed for Android NDK.
-
- # Optional: Add include directories if your .h files are in subdirectories
- # For this simple example, HelloWorld.h and HelloWorld.cpp are in the same directory (jni/)
- # target_include_directories(HelloWorld PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+message(STATUS "CMake configuration for ${PROJECT_NAME} JNI library complete.")
+message(STATUS "Output library will be: ${CMAKE_BINARY_DIR}/${CMAKE_CFG_INTDIR}/<prefix>HelloWorld<suffix>")
+message(STATUS "CMAKE_C_COMPILER: ${CMAKE_C_COMPILER}")
+message(STATUS "CMAKE_CXX_COMPILER: ${CMAKE_CXX_COMPILER}")
