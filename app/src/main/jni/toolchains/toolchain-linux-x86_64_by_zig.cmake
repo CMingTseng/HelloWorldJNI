@@ -1,0 +1,10 @@
+set(CMAKE_SYSTEM_NAME Linux)
+set(CMAKE_SYSTEM_PROCESSOR x86_64)
+
+set(ZIG_EXE "zig")
+set(TARGET_TRIPLE "x86_64-linux-gnu")
+set(CMAKE_C_COMPILER "${ZIG_EXE}" "cc" "-target" "${TARGET_TRIPLE}")
+set(CMAKE_CXX_COMPILER "${ZIG_EXE}" "c++" "-target" "${TARGET_TRIPLE}")
+message(STATUS "Toolchain: CMAKE_SYSROOT is not explicitly set. Letting Zig manage it implicitly.")
+message(STATUS "Toolchain: C Compiler configured to: ${CMAKE_C_COMPILER}")
+message(STATUS "Toolchain: CXX Compiler configured to: ${CMAKE_CXX_COMPILER}")

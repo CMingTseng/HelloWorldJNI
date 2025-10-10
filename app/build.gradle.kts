@@ -800,20 +800,29 @@ tasks.register<Exec>("buildNativeLib") {
     cmakeGenerator = "MinGW Makefiles"
     when(hostOsIdentifier){
         "windows"->{
-            val isZIgExist = checkingZig()
+            val isZIgExist= checkingZig()
             if (targetOsForJni == "windows"){
                 cmakeArgs.add("-DCMAKE_SYSTEM_NAME=Windows")
                 cmakeArgs.add("-DCMAKE_SYSTEM_PROCESSOR=x86_64")
-//               val isMinGW64 = checkingMinGW()
-                val isMinGW64 = false
-                val isZIG=true
-                if (isMinGW64){
+                val isMinGW64 = checkingMinGW()
+               if (isMinGW64){
                     cmakeGenerator = "MinGW Makefiles"
-
-                } else if(isZIG){
+                } else if(isZIgExist){
                     cmakeGenerator="Ninja"
-                    val isUseToolchainFile = false
+                    val isUseToolchainFile = true
                     if (isUseToolchainFile){
+                        logger.lifecycle("[Build Config] Using ZIG via external toolchain file.")
+                        val toolchainFileName = "toolchain-windows-x86_64_by_zig.cmake"
+                        val toolchainFile = toolchainFileDir.resolve(toolchainFileName)
+                        if (!toolchainFile.exists()) {
+                            throw GradleException(
+                                "Toolchain file strategy is enabled (isUseToolchainFile=true), " +
+                                        "but the file was not found at the expected location: ${toolchainFile.absolutePath}"
+                            )
+                        }
+                        cmakeArgs.add("-DCMAKE_TOOLCHAIN_FILE=${toolchainFile.absolutePath.replace("\\", "/")}")
+
+                        logger.lifecycle("[Build Config] Toolchain file set to: ${toolchainFile.absolutePath}")
 
                     }else{
                         val targetTriple = "x86_64-windows-gnu"
@@ -839,18 +848,32 @@ tasks.register<Exec>("buildNativeLib") {
             }else if(targetOsForJni == "linux"){
                 cmakeArgs.add("-DCMAKE_SYSTEM_NAME=Linux")
                 cmakeArgs.add("-DCMAKE_SYSTEM_PROCESSOR=x86_64")
+                cmakeGenerator="Ninja"
                 val isCygwin = false
                 if (isCygwin) {
                     //TODO Cygwin to big !!!
-                } else if ( hasNinja && isUseAndroidSDK) {//FIXME need Linux sysroot !!
-                    //TODO cmake + clang + ninja
-                } else if (isZIgExist && hasNinja) {
-                    val isUseToolchainFile = false
+                }
+//                else if ( hasNinja && isUseAndroidSDK) {//FIXME need Linux sysroot !!
+//                    //TODO cmake + clang + ninja
+//                }
+                else if (isZIgExist && hasNinja) {
+                    val isUseToolchainFile = true
                     if (isUseToolchainFile) {
+                        logger.lifecycle("[Build Config] Using ZIG via external toolchain file.")
+                        val toolchainFileName = "toolchain-linux-x86_64_by_zig.cmake"
+                        val toolchainFile = toolchainFileDir.resolve(toolchainFileName)
+                        if (!toolchainFile.exists()) {
+                            throw GradleException(
+                                "Toolchain file strategy is enabled (isUseToolchainFile=true), " +
+                                        "but the file was not found at the expected location: ${toolchainFile.absolutePath}"
+                            )
+                        }
+                        cmakeArgs.add("-DCMAKE_TOOLCHAIN_FILE=${toolchainFile.absolutePath.replace("\\", "/")}")
+
+                        logger.lifecycle("[Build Config] Toolchain file set to: ${toolchainFile.absolutePath}")
 
                     } else {
                         //FIXME like cli
-                        cmakeGenerator="Ninja"
 //                       cmakeArgs.add("-G"); cmakeArgs.add("Ninja")
                         logger.lifecycle("[Build Config After -G Ninja] cmakeArgs now contains '-G Ninja'. Size: ${cmakeArgs.size}")
                         cmakeArgs.add("-DCMAKE_C_COMPILER=zig;cc")
