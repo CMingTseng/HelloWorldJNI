@@ -852,6 +852,7 @@ tasks.register<Exec>("buildNativeLib") {
                 val isCygwin = false
                 if (isCygwin) {
                     //TODO Cygwin to big !!!
+                    //Ref : https://metamod-p.sourceforge.net/cross-compiling.on.windows.for.linux.html
                 }
 //                else if ( hasNinja && isUseAndroidSDK) {//FIXME need Linux sysroot !!
 //                    //TODO cmake + clang + ninja
